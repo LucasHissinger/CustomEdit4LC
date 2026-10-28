@@ -19,6 +19,31 @@ declare global {
 }
 
 export default function App() {
+  type CropBox = { top: number; bottom: number; left: number; right: number };
+  const [cropBox, setCropBox] = useState<CropBox>({
+    top: 0,
+    bottom: 0,
+    left: 0,
+    right: 0,
+  });
+  const [cropMode, setCropMode] = useState(false);
+  const [naturalSize, setNaturalSize] = useState<{
+    w: number;
+    h: number;
+  } | null>(null);
+  const [videoRect, setVideoRect] = useState<{
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const dragEdgeRef = useRef<keyof CropBox | null>(null);
+
+  const hasCrop =
+    cropBox.top + cropBox.bottom + cropBox.left + cropBox.right > 0;
+
   const [mediaPath, setMediaPath] = useState<string | null>(null);
   const [isAudioOnly, setIsAudioOnly] = useState(false);
   const [url, setUrl] = useState("");
@@ -30,7 +55,7 @@ export default function App() {
   );
   const [isImage, setIsImage] = useState(false);
   const externalAudioRef = useRef<HTMLAudioElement>(null);
-  const [currentTime, setCurrentTime] = useState(0);
+  // const [currentTime, setCurrentTime] = useState(0);
 
   const [exportState, setExportState] = useState<
     "idle" | "naming" | "exporting" | "done"
@@ -78,6 +103,11 @@ export default function App() {
         `local-media://asset/?path=${encodeURIComponent(res.filePath)}`,
       );
       setIsAudioOnly(false);
+      setIsImage(false);
+      setExternalAudioPath(null);
+      resetCrop();
+      setNaturalSize(null);
+      setVideoRect(null);
     } else alert("Erreur : " + res.error);
     setIsLoading(false);
   };
@@ -89,8 +119,11 @@ export default function App() {
         `local-media://asset/?path=${encodeURIComponent(file.path)}`,
       );
       setIsAudioOnly(file.type.startsWith("audio/"));
-      setIsImage(file.type.startsWith("image/")); // Détecte si c'est une image
-      setExternalAudioPath(null); // Réinitialise l'audio externe si on change de vidéo
+      setIsImage(file.type.startsWith("image/"));
+      setExternalAudioPath(null);
+      resetCrop();
+      setNaturalSize(null);
+      setVideoRect(null);
     }
   };
 
@@ -112,6 +145,9 @@ export default function App() {
       setStartTime(0);
       setEndTime(dur);
     }
+    if (e.target.videoWidth) {
+      setNaturalSize({ w: e.target.videoWidth, h: e.target.videoHeight });
+    }
   };
 
   const handlePreviewClip = () => {
@@ -128,6 +164,75 @@ export default function App() {
       mediaRef.current.currentTime = startTime;
       mediaRef.current.play();
     }
+  };
+
+  // Zone réellement occupée par l'image/vidéo dans son élément (hors bandes du letterbox CSS)
+  const updateVideoRect = () => {
+    const el = isImage ? imgRef.current : mediaRef.current;
+    if (!el || !naturalSize) return;
+    const cw = el.clientWidth;
+    const ch = el.clientHeight;
+    const scale = Math.min(cw / naturalSize.w, ch / naturalSize.h);
+    const width = naturalSize.w * scale;
+    const height = naturalSize.h * scale;
+    setVideoRect({
+      left: el.offsetLeft + (cw - width) / 2,
+      top: el.offsetTop + (ch - height) / 2,
+      width,
+      height,
+    });
+  };
+
+  useEffect(() => {
+    updateVideoRect();
+    const el = isImage ? imgRef.current : mediaRef.current;
+    const ro = new ResizeObserver(updateVideoRect);
+    if (el) ro.observe(el);
+    window.addEventListener("resize", updateVideoRect);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", updateVideoRect);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [naturalSize, isImage, mediaPath, isAudioOnly]);
+
+  const resetCrop = () => {
+    setCropBox({ top: 0, bottom: 0, left: 0, right: 0 });
+    setCropMode(false);
+  };
+
+  const startDrag = (edge: keyof CropBox) => (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    dragEdgeRef.current = edge;
+  };
+
+  const onDrag = (e: React.PointerEvent) => {
+    const edge = dragEdgeRef.current;
+    const overlay = overlayRef.current;
+    if (!edge || !overlay) return;
+    const r = overlay.getBoundingClientRect();
+    const fx = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const fy = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    const MIN = 0.1; // le cadre garde au minimum 10% de la taille
+
+    setCropBox((prev) => {
+      switch (edge) {
+        case "left":
+          return { ...prev, left: Math.min(fx, 1 - prev.right - MIN) };
+        case "right":
+          return { ...prev, right: Math.min(1 - fx, 1 - prev.left - MIN) };
+        case "top":
+          return { ...prev, top: Math.min(fy, 1 - prev.bottom - MIN) };
+        case "bottom":
+          return { ...prev, bottom: Math.min(1 - fy, 1 - prev.top - MIN) };
+      }
+    });
+  };
+
+  const endDrag = () => {
+    dragEdgeRef.current = null;
   };
 
   const handleOpenNamingModal = () => {
@@ -170,6 +275,7 @@ export default function App() {
         ? new URL(externalAudioPath).searchParams.get("path")
         : null,
       isImage,
+      crop: hasCrop ? cropBox : null,
     });
 
     if (res.success) setExportState("done");
@@ -184,7 +290,7 @@ export default function App() {
 
     if (player) {
       const current = player.currentTime;
-      setCurrentTime(current); // 🚀 Met à jour la position de la barre de lecture
+      // setCurrentTime(current);
       if (!player.paused && current >= endTime) {
         player.pause();
         player.currentTime = startTime;
@@ -205,13 +311,13 @@ export default function App() {
     }
   };
 
-  const handlePlaybackSliderChange = (val: number | number[]) => {
-    if (typeof val === "number") {
-      setCurrentTime(val);
-      if (mediaRef.current) mediaRef.current.currentTime = val;
-      if (externalAudioRef.current) externalAudioRef.current.currentTime = val;
-    }
-  };
+  // const handlePlaybackSliderChange = (val: number | number[]) => {
+  //   if (typeof val === "number") {
+  //     setCurrentTime(val);
+  //     if (mediaRef.current) mediaRef.current.currentTime = val;
+  //     if (externalAudioRef.current) externalAudioRef.current.currentTime = val;
+  //   }
+  // };
 
   const getPreviewFilter = () => {
     switch (videoEffect) {
@@ -245,11 +351,11 @@ export default function App() {
       <div className="container center">
         <h1>✂️ CustomEdit4LC</h1>
         <div className="card">
-          <h3>1. Depuis une URL (YouTube, TikTok...)</h3>
+          <h3>1. From a URL (YouTube, TikTok...)</h3>
           <div className="input-group">
             <input
               type="text"
-              placeholder="Lien..."
+              placeholder="URL..."
               value={url}
               onChange={(e) => setUrl(e.target.value)}
             />
@@ -258,16 +364,16 @@ export default function App() {
               onClick={handleDownload}
               disabled={isLoading}
             >
-              {isLoading ? "Téléchargement..." : "Télécharger"}
+              {isLoading ? "Downloading..." : "Download"}
             </button>
           </div>
 
-          <h3 style={{ marginTop: "30px" }}>2. Depuis votre PC</h3>
+          <h3 style={{ marginTop: "30px" }}>2. From your PC</h3>
           <label
             className="btn-primary"
             style={{ display: "block", textAlign: "center" }}
           >
-            📁 Choisir un fichier
+            Choose a file
             <input
               type="file"
               accept="video/*,audio/*,image/*"
@@ -287,7 +393,7 @@ export default function App() {
           <div className="export-modal">
             {exportState === "naming" ? (
               <>
-                <h2>✍️ Nommer votre fichier</h2>
+                <h2>Name your file</h2>
                 <div style={{ width: "100%", margin: "20px 0" }}>
                   <input
                     type="text"
@@ -303,7 +409,7 @@ export default function App() {
                       fontSize: "16px",
                       outline: "none",
                     }}
-                    placeholder="Nom du fichier..."
+                    placeholder="Name of the file..."
                     autoFocus
                   />
                 </div>
@@ -313,20 +419,20 @@ export default function App() {
                     style={{ background: "#444", flex: 1 }}
                     onClick={() => setExportState("idle")}
                   >
-                    Annuler
+                    Cancel
                   </button>
                   <button
                     className="btn-primary"
                     style={{ background: "#10B981", flex: 1 }}
                     onClick={handleConfirmExport}
                   >
-                    Valider & Exporter
+                    Validate & Export
                   </button>
                 </div>
               </>
             ) : exportState === "exporting" ? (
               <>
-                <h2>⏳ Export en cours...</h2>
+                <h2>⏳ Export in progress...</h2>
                 <div className="progress-bar-container">
                   <div
                     className="progress-bar-fill"
@@ -339,7 +445,7 @@ export default function App() {
               </>
             ) : (
               <>
-                <h2>✅ Export terminé !</h2>
+                <h2>Export completed !</h2>
                 <div
                   style={{
                     display: "flex",
@@ -353,7 +459,7 @@ export default function App() {
                     className="btn-primary"
                     onClick={() => setExportState("idle")}
                   >
-                    Continuer l'édition
+                    Continue editing
                   </button>
                   <button
                     className="btn-primary"
@@ -365,7 +471,7 @@ export default function App() {
                       );
                     }}
                   >
-                    📂 Ouvrir dans l'explorateur
+                    Open in file explorer
                   </button>
                   <button
                     className="btn-success"
@@ -377,20 +483,20 @@ export default function App() {
                         );
                       if (ok) {
                         alert(
-                          "Média copié dans le presse-papier ! Fais Ctrl+V dans Discord.",
+                          "Media copied to clipboard ! Press Ctrl+V in Discord.",
                         );
                       } else {
-                        alert("Erreur : fichier introuvable.");
+                        alert("Error : Missing file.");
                       }
                     }}
                   >
-                    📋 Copier le média
+                    Copy to clipboard
                   </button>
                   <button
                     className="btn-danger"
                     onClick={() => window.electronAPI.quitApp()}
                   >
-                    Quitter l'application
+                    Quit
                   </button>
                 </div>
               </>
@@ -402,16 +508,27 @@ export default function App() {
       <div className="container layout-split">
         <div className="preview-section">
           <button className="back-btn" onClick={() => setMediaPath(null)}>
-            ⬅ Changer de fichier
+            Change file
           </button>
 
-          <div className="media-player-wrapper">
+          <div
+            className="media-player-wrapper"
+            style={{ position: "relative", overflow: "visible" }}
+          >
             {isImage ? (
               <img
+                ref={imgRef}
                 src={mediaPath}
+                onLoad={(e) =>
+                  setNaturalSize({
+                    w: e.currentTarget.naturalWidth,
+                    h: e.currentTarget.naturalHeight,
+                  })
+                }
                 style={{
                   width: "100%",
-                  maxHeight: "50vh",
+                  maxHeight: "65vh",
+                  objectFit: "contain",
                   filter: getPreviewFilter(),
                   transition: "filter 0.3s",
                 }}
@@ -421,14 +538,14 @@ export default function App() {
                 key={mediaPath}
                 ref={mediaRef}
                 src={mediaPath}
-                controls
+                controls={!cropMode}
                 autoPlay
                 onLoadedMetadata={handleLoadedMetadata}
                 onTimeUpdate={handleTimeUpdate}
                 style={{
                   display: isAudioOnly ? "none" : "block",
                   width: "100%",
-                  maxHeight: "50vh",
+                  maxHeight: "65vh",
                   filter: getPreviewFilter(),
                   transition: "filter 0.3s",
                 }}
@@ -439,17 +556,141 @@ export default function App() {
                 ref={externalAudioRef}
                 src={externalAudioPath}
                 autoPlay
-                onLoadedMetadata={handleLoadedMetadata} // C'est l'audio qui contrôle la timeline !
+                onLoadedMetadata={handleLoadedMetadata}
                 onTimeUpdate={handleTimeUpdate}
               />
             )}
-            {isAudioOnly && (
-              <div className="audio-placeholder">🎵 Mode Audio Actif</div>
+            {isAudioOnly && <div className="audio-placeholder">Audio only</div>}
+            {videoRect && (cropMode || hasCrop) && (
+              <div
+                ref={overlayRef}
+                style={{
+                  position: "absolute",
+                  left: videoRect.left,
+                  top: videoRect.top,
+                  width: videoRect.width,
+                  height: videoRect.height,
+                  pointerEvents: "none",
+                }}
+              >
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    height: `${cropBox.top * 100}%`,
+                    background: "rgba(0,0,0,0.65)",
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    right: 0,
+                    bottom: 0,
+                    height: `${cropBox.bottom * 100}%`,
+                    background: "rgba(0,0,0,0.65)",
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    width: `${cropBox.left * 100}%`,
+                    top: `${cropBox.top * 100}%`,
+                    bottom: `${cropBox.bottom * 100}%`,
+                    background: "rgba(0,0,0,0.65)",
+                  }}
+                />
+                <div
+                  style={{
+                    position: "absolute",
+                    right: 0,
+                    width: `${cropBox.right * 100}%`,
+                    top: `${cropBox.top * 100}%`,
+                    bottom: `${cropBox.bottom * 100}%`,
+                    background: "rgba(0,0,0,0.65)",
+                  }}
+                />
+
+                <div
+                  style={{
+                    position: "absolute",
+                    left: `${cropBox.left * 100}%`,
+                    right: `${cropBox.right * 100}%`,
+                    top: `${cropBox.top * 100}%`,
+                    bottom: `${cropBox.bottom * 100}%`,
+                    border: "2px solid #10B981",
+                    boxSizing: "border-box",
+                  }}
+                />
+
+                {cropMode &&
+                  (
+                    [
+                      {
+                        k: "top",
+                        style: {
+                          left: `${cropBox.left * 100}%`,
+                          right: `${cropBox.right * 100}%`,
+                          top: `calc(${cropBox.top * 100}% - 8px)`,
+                          height: 16,
+                          cursor: "ns-resize",
+                        },
+                      },
+                      {
+                        k: "bottom",
+                        style: {
+                          left: `${cropBox.left * 100}%`,
+                          right: `${cropBox.right * 100}%`,
+                          bottom: `calc(${cropBox.bottom * 100}% - 8px)`,
+                          height: 16,
+                          cursor: "ns-resize",
+                        },
+                      },
+                      {
+                        k: "left",
+                        style: {
+                          top: `${cropBox.top * 100}%`,
+                          bottom: `${cropBox.bottom * 100}%`,
+                          left: `calc(${cropBox.left * 100}% - 8px)`,
+                          width: 16,
+                          cursor: "ew-resize",
+                        },
+                      },
+                      {
+                        k: "right",
+                        style: {
+                          top: `${cropBox.top * 100}%`,
+                          bottom: `${cropBox.bottom * 100}%`,
+                          right: `calc(${cropBox.right * 100}% - 8px)`,
+                          width: 16,
+                          cursor: "ew-resize",
+                        },
+                      },
+                    ] as { k: keyof CropBox; style: React.CSSProperties }[]
+                  ).map(({ k, style }) => (
+                    <div
+                      key={k}
+                      onPointerDown={startDrag(k)}
+                      onPointerMove={onDrag}
+                      onPointerUp={endDrag}
+                      onPointerCancel={endDrag}
+                      style={{
+                        position: "absolute",
+                        pointerEvents: "auto",
+                        touchAction: "none",
+                        background: "rgba(16,185,129,0.5)",
+                        ...style,
+                      }}
+                    />
+                  ))}
+              </div>
             )}
           </div>
 
-          {/* 🚀 AJOUTER CETTE BARRE DE LECTURE GLOBALE ICI */}
-          <div
+          {/* <div
             style={{
               background: "#161616",
               padding: "15px 20px",
@@ -487,7 +728,7 @@ export default function App() {
               ]}
               railStyle={{ backgroundColor: "#333", height: 6 }}
             />
-          </div>
+          </div> */}
 
           <div
             style={{
@@ -497,9 +738,8 @@ export default function App() {
               marginTop: "20px",
             }}
           >
-            <h3>✂️ Sélectionner la portion du clip</h3>
+            <h3>Select the clip portion</h3>
 
-            {/* Si c'est une image SANS musique, on bloque la timeline */}
             {isImage && !externalAudioPath ? (
               <p
                 style={{
@@ -508,7 +748,7 @@ export default function App() {
                   margin: "20px 0",
                 }}
               >
-                ⚠️ Ajoutez une musique (à droite) pour activer la timeline.
+                Add a track (on the right) to enable the timeline.
               </p>
             ) : (
               <>
@@ -520,9 +760,9 @@ export default function App() {
                     color: "#aaa",
                   }}
                 >
-                  <span>Début : {startTime.toFixed(1)}s</span>
-                  <span>Durée : {(endTime - startTime).toFixed(1)}s</span>
-                  <span>Fin : {endTime.toFixed(1)}s</span>
+                  <span>Start : {startTime.toFixed(1)}s</span>
+                  <span>Duration : {(endTime - startTime).toFixed(1)}s</span>
+                  <span>End : {endTime.toFixed(1)}s</span>
                 </div>
 
                 <Slider
@@ -552,7 +792,6 @@ export default function App() {
                   railStyle={{ backgroundColor: "#333", height: 8 }}
                 />
 
-                {/* 🚀 BOUTON VOIR LE CLIP */}
                 <button
                   className="btn-primary"
                   style={{
@@ -562,7 +801,7 @@ export default function App() {
                   }}
                   onClick={handlePreviewClip}
                 >
-                  ▶️ Jouer le clip (De {startTime.toFixed(1)}s à{" "}
+                  ▶Preview the clip (From {startTime.toFixed(1)}s to{" "}
                   {endTime.toFixed(1)}s)
                 </button>
               </>
@@ -571,10 +810,10 @@ export default function App() {
         </div>
 
         <div className="controls-section">
-          <h2>Paramètres du Clip</h2>
+          <h2>Clip Settings</h2>
 
           <div className="control-group">
-            <label>Vitesse : {speed}x</label>
+            <label>Speed : {speed}x</label>
             <input
               type="range"
               min="0.5"
@@ -588,7 +827,8 @@ export default function App() {
 
           <div className="control-group">
             <label>
-              Volume : {volume}% {volume > 100 && " (Sera amplifié au rendu)"}
+              Volume : {volume}%{" "}
+              {volume > 100 && " (Will be amplified in the export)"}
             </label>
             <input
               type="range"
@@ -602,35 +842,82 @@ export default function App() {
           </div>
 
           {!isAudioOnly && (
-            <div className="control-group">
-              <label>Effet Vidéo</label>
-              <select
-                value={videoEffect}
-                onChange={(e) => setVideoEffect(e.target.value)}
-              >
-                <option value="none">Normal</option>
-                <option value="bw">Noir & Blanc</option>
-                <option value="sepia">Sépia (Rétro)</option>
-                <option value="invert">Inversé (Négatif)</option>
-                <option value="contrast">Contraste Élevé</option>
-                <option value="saturated">Super Saturé</option>
-                <option value="blur">Flou</option>
-                <option value="mirror">Effet Miroir</option>
-                <option value="pixelate">Pixelisé (Jeu Rétro)</option>
-                <option value="vignette">Vignette (Sombre autour)</option>
-                <option value="horror">
-                  Cauchemar (Noir, Contrasté, Bruit)
-                </option>
-                <option value="deepfry">Friture (Saturé extrême + Net)</option>
-                <option value="neon">Contours Fluo (Néon)</option>
-                <option value="alien_vision">Vision Alien (Toxique)</option>
-                <option value="glitch">Vieux VHS Cassé / Glitch</option>
-              </select>
-            </div>
+            <>
+              <div className="control-group">
+                <label>Video Effect</label>
+                <select
+                  value={videoEffect}
+                  onChange={(e) => setVideoEffect(e.target.value)}
+                >
+                  <option value="none">Normal</option>
+                  <option value="bw">Noir & Blanc</option>
+                  <option value="sepia">Sépia (Rétro)</option>
+                  <option value="invert">Inversé (Négatif)</option>
+                  <option value="contrast">Contraste Élevé</option>
+                  <option value="saturated">Super Saturé</option>
+                  <option value="blur">Flou</option>
+                  <option value="mirror">Effet Miroir</option>
+                  <option value="pixelate">Pixelisé (Jeu Rétro)</option>
+                  <option value="vignette">Vignette (Sombre autour)</option>
+                  <option value="horror">
+                    Cauchemar (Noir, Contrasté, Bruit)
+                  </option>
+                  <option value="deepfry">
+                    Friture (Saturé extrême + Net)
+                  </option>
+                  <option value="neon">Contours Fluo (Néon)</option>
+                  <option value="alien_vision">Vision Alien (Toxique)</option>
+                  <option value="glitch">Vieux VHS Cassé / Glitch</option>
+                </select>
+              </div>
+              <div className="control-group">
+                <label>Crop</label>
+                <button
+                  className="btn-primary"
+                  style={{
+                    width: "100%",
+                    marginTop: "5px",
+                    background: cropMode ? "#10B981" : "#3B82F6",
+                  }}
+                  onClick={() => setCropMode((v) => !v)}
+                  disabled={!videoRect}
+                >
+                  {cropMode ? "Finish cropping" : "Crop the video"}
+                </button>
+                {hasCrop && (
+                  <>
+                    <p
+                      style={{
+                        fontSize: "13px",
+                        color: "#aaa",
+                        margin: "8px 0 4px",
+                      }}
+                    >
+                      Removed: top {(cropBox.top * 100).toFixed(0)}% · bottom{" "}
+                      {(cropBox.bottom * 100).toFixed(0)}% · left{" "}
+                      {(cropBox.left * 100).toFixed(0)}% · right{" "}
+                      {(cropBox.right * 100).toFixed(0)}%
+                    </p>
+                    <button
+                      style={{
+                        width: "100%",
+                        background: "red",
+                        color: "white",
+                        border: "none",
+                        padding: "5px",
+                      }}
+                      onClick={resetCrop}
+                    >
+                      Reset cropping
+                    </button>
+                  </>
+                )}
+              </div>
+            </>
           )}
 
           <div className="control-group">
-            <label>Effet Audio</label>
+            <label>Audio Effect</label>
             <select
               value={audioEffect}
               onChange={(e) => setAudioEffect(e.target.value)}
@@ -651,7 +938,7 @@ export default function App() {
 
           {isImage && (
             <div className="control-group">
-              <label>Ajouter une musique de fond (Requise)</label>
+              <label>Add background music (Required)</label>
               <label
                 className="btn-primary"
                 style={{
@@ -664,8 +951,8 @@ export default function App() {
                 }}
               >
                 {externalAudioPath
-                  ? "Son ajouté (cliquer pour changer)"
-                  : "Choisir un fichier .mp3"}
+                  ? "Sound added (click to change)"
+                  : "Choose a .MP3 or .WAV file"}
                 <input
                   type="file"
                   accept="audio/*"
@@ -685,7 +972,7 @@ export default function App() {
                   }}
                   onClick={() => setExternalAudioPath(null)}
                 >
-                  ❌ Retirer le son externe
+                  Remove external sound
                 </button>
               )}
             </div>
@@ -703,7 +990,7 @@ export default function App() {
               style={{ width: "20px", height: "20px" }}
             />
             <label htmlFor="mp3Only" style={{ fontWeight: "bold" }}>
-              Exporter en .MP3
+              Export as .MP3
             </label>
           </div>
 
@@ -713,8 +1000,8 @@ export default function App() {
             disabled={exportState !== "idle" || (isImage && !externalAudioPath)}
           >
             {isImage && !externalAudioPath
-              ? "🚫 Musique manquante pour l'export"
-              : "💾 Exporter le fichier final"}
+              ? "Missing music for the export"
+              : "Export the final file"}
           </button>
         </div>
       </div>

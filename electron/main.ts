@@ -7,7 +7,7 @@ import { create as createYoutubeDl } from 'youtube-dl-exec';
 import fs from 'node:fs';
 import os from 'node:os';
 import clipboardEx from 'electron-clipboard-ex';
-import { shell } from 'electron'; // Assurez-vous d'importer 'shell' tout en haut si ce n'est
+import { shell } from 'electron';
 
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
@@ -43,7 +43,7 @@ const youtubedl = createYoutubeDl(ytDlpBinaryPath);
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 1100,
-    height: 850,
+    height: 950,
     icon: path.join(process.env.APP_ROOT, 'public', 'icon.ico'),
     webPreferences: {
       preload: path.join(__dirname, "preload.mjs"), 
@@ -124,12 +124,12 @@ ipcMain.handle('copy-file-to-clipboard', (_event, filePath) => {
 });
 
 ipcMain.handle('export-media', async (_event, options) => {
-  const { 
+  const {
     inputPath, startTime, duration, speed, volume, 
     videoEffect, audioEffect, isAudioOnly, exportAsMp3, 
-    externalAudioPath, isImage 
+    externalAudioPath, isImage, crop
   } = options;
-  
+
   const filePath = options.outputPath;
   if (!filePath) return { success: false, error: "Annulé" };
 
@@ -181,6 +181,16 @@ ipcMain.handle('export-media', async (_event, options) => {
     }
     if (volume !== 1) {
       aFilters.push(`volume=${volume}`);
+    }
+
+    // Crop
+    if (crop && ['top', 'bottom', 'left', 'right'].every(k => Number.isFinite(crop[k]))
+        && (crop.top + crop.bottom + crop.left + crop.right) > 0) {
+      const f = (n: number) => Number(n).toFixed(4);
+      // Valeurs en fraction de la vidéo (0 à 1), arrondies à des nombres pairs pour libx264
+      vFilters.unshift(
+        `crop=trunc(iw*${f(1 - crop.left - crop.right)}/2)*2:trunc(ih*${f(1 - crop.top - crop.bottom)}/2)*2:trunc(iw*${f(crop.left)}/2)*2:trunc(ih*${f(crop.top)}/2)*2`
+      );
     }
 
     // Effets Vidéo
